@@ -747,7 +747,7 @@ class _FakeBenchEnginePool:
 
 
 class TestBenchmarkEngineSelection:
-    async def _run(self, *, settings=None, force_lm_engine=False):
+    async def _run(self, *, settings=None, force_lm_engine=False, engine=None):
         run = BenchmarkRun(
             bench_id="bench-test",
             request=BenchmarkRequest(
@@ -757,10 +757,36 @@ class TestBenchmarkEngineSelection:
                 force_lm_engine=force_lm_engine,
             ),
         )
-        pool = _FakeBenchEnginePool(settings)
+        pool = _FakeBenchEnginePool(settings, engine=engine)
         with patch("omlx.admin.benchmark._upload_to_omlx_ai", AsyncMock()):
             await run_benchmark(run, pool)
         return run, pool
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_attr", ["_model", "_target_model"])
+    @pytest.mark.parametrize("compiled_layers", [0, 2])
+    async def test_ane_metadata_uses_compiled_target_layers(
+        self, model_attr, compiled_layers
+    ):
+        from omlx.model_settings import ModelSettings
+
+        engine = _FakeBenchEngine()
+        setattr(
+            engine,
+            model_attr,
+            SimpleNamespace(
+                _omlx_ane_mlp_prefill_count=compiled_layers,
+                _omlx_ane_gdn_prefill_count=0,
+            ),
+        )
+        run, _ = await self._run(
+            settings=ModelSettings(qwen35_ane_prefill_enabled=True), engine=engine
+        )
+
+        assert run.status == "completed"
+        assert ("qwen35_ane_prefill" in run.experimental_features) == bool(
+            compiled_layers
+        )
 
     @pytest.mark.asyncio
     async def test_auto_uses_vlm_engine_for_vlm_mtp_with_drafter(self):

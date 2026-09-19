@@ -1856,6 +1856,8 @@ async def run_benchmark(run: BenchmarkRun, engine_pool: Any) -> None:
             # uploaded metadata reflect the runtime state (the patch can find
             # no eligible layers or drop layers at the program budget).
             loaded_model = getattr(engine, "_model", None)
+            if loaded_model is None:
+                loaded_model = getattr(engine, "_target_model", None)
             compiled_mlp = getattr(
                 loaded_model, "_omlx_ane_mlp_prefill_count", None
             )
