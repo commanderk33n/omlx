@@ -29,7 +29,7 @@ from omlx.utils import hardware, proc_memory
 logger = logging.getLogger(__name__)
 
 _COMPILE_LOCK = threading.RLock()
-_PATCHED_CLASSES: set[type] = set()
+_PATCHED_CLASSES: dict[type, Callable[..., mx.array]] = {}
 _VLM_HOOK_INSTALLED = False
 _VLM_GDN_HOOK_INSTALLED = False
 _GDN_MODULES: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
@@ -2073,7 +2073,10 @@ def _backend(
 
 
 def _wrap_class(cls: type) -> None:
-    if cls in _PATCHED_CLASSES:
+    # A later Q4 patch can replace __call__ and bypass ANE. Only skip
+    # wrapping if our wrapper is still the active __call__; otherwise,
+    # wrap the new callable so ANE gets first choice again.
+    if cls.__call__ is _PATCHED_CLASSES.get(cls):
         return
     original: Callable[..., mx.array] = cls.__call__
 
@@ -2085,7 +2088,7 @@ def _wrap_class(cls: type) -> None:
 
     cls.__call__ = patched
     cls._omlx_ane_prefill_original_call = original
-    _PATCHED_CLASSES.add(cls)
+    _PATCHED_CLASSES[cls] = patched
 
 
 def _install_dispatch() -> bool:
