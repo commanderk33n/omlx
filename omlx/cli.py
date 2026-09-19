@@ -54,6 +54,9 @@ def _has_cli_overrides(args) -> bool:
         "host",
         "log_level",
         "sse_keepalive_mode",
+        "max_audio_upload_size",
+        "max_image_upload_size",
+        "max_image_side_length",
         "max_concurrent_requests",
         "embedding_batch_size",
         "memory_guard",
@@ -61,6 +64,7 @@ def _has_cli_overrides(args) -> bool:
         "paged_ssd_cache_dir",
         "paged_ssd_cache_max_size",
         "hot_cache_max_size",
+        "hot_cache_write_through",
         "initial_cache_blocks",
         "mcp_config",
         "hf_endpoint",
@@ -108,6 +112,12 @@ def serve_command(args):
 
     # Initialize global settings first (to get log_level from file if not specified)
     settings = init_settings(base_path=args.base_path, cli_args=args)
+
+    # The native ANE compile-cache gate reads this env var once, at the first
+    # compile, so it must be exported before any engine loads. setdefault
+    # keeps an explicit env override authoritative.
+    if settings.cache.ane_compile_cache:
+        os.environ.setdefault("OMLX_QWEN35_ANE_COMPILE_CACHE", "1")
 
     # Register TRACE level (5) — includes full message content
     TRACE = 5
@@ -305,6 +315,13 @@ def serve_command(args):
         else:
             scheduler_config.hot_cache_max_size = 0
 
+        # Write-through: explicit CLI flag > settings file (already mapped by
+        # settings.to_scheduler_config()).
+        if getattr(args, "hot_cache_write_through", None) is not None:
+            scheduler_config.hot_cache_write_through = bool(
+                args.hot_cache_write_through
+            )
+
         if args.no_cache:
             print(
                 "Mode: Multi-model serving (no oMLX cache, mlx-lm BatchGenerator only)"
@@ -482,15 +499,12 @@ def launch_command(args, extra_args: list[str] | None = None):
         print(f"Install: {integration.install_hint}")
         sys.exit(1)
 
-    # If the model was chosen interactively (no --model and no explicit tier flags),
-    # use the picked model for all tiers instead of letting settings-based tier
-    # models override the user's selection.
-    if args.model is None and not (
-        cli_opus_model or cli_sonnet_model or cli_haiku_model
-    ):
-        opus_model = None
-        sonnet_model = None
-        haiku_model = None
+    # Tier precedence: explicit tier flag > saved claude_code tier setting >
+    # the model picked (or auto-selected) above. The picker only chooses the
+    # default model; tiers configured on the Claude Code settings page keep
+    # their role, otherwise the three persisted selections would be silently
+    # replaced by one model on every interactive launch (#3543). Roles without
+    # a saved model fall back to the picked model in the integration.
 
     # Enforce Claude Code's model requirements after all interactive,
     # automatic, and explicit model paths have resolved. The picker also marks
@@ -527,6 +541,18 @@ def launch_command(args, extra_args: list[str] | None = None):
 
     # Resolve model limits from pre-fetched status
     model_info = models_status_map.get(model, {})
+    context_window = model_info.get("max_context_window")
+    if tool_name == "claude":
+        # Claude's context overrides are process-wide, including tier switches
+        # and subagents. Do not advertise more than any configured model allows.
+        context_windows = [
+            info["max_context_window"]
+            for model_id in (model, opus_model, sonnet_model, haiku_model)
+            if (info := models_status_map.get(model_id, {}))
+            and isinstance(info.get("max_context_window"), int)
+            and info["max_context_window"] > 0
+        ]
+        context_window = min(context_windows) if context_windows else None
     ctx = IntegrationContext(
         host=connect_host,
         port=port,
@@ -535,7 +561,7 @@ def launch_command(args, extra_args: list[str] | None = None):
         opus_model=opus_model if tool_name == "claude" else None,
         sonnet_model=sonnet_model if tool_name == "claude" else None,
         haiku_model=haiku_model if tool_name == "claude" else None,
-        context_window=model_info.get("max_context_window"),
+        context_window=context_window,
         max_tokens=model_info.get("max_tokens"),
         model_type=model_info.get("model_type"),
         reasoning=model_info.get("enable_thinking"),
@@ -1056,6 +1082,30 @@ Example directory structure:
         "OpenClaw / WorkBuddy; 'comment' emits the legacy ': keep-alive' SSE "
         "comment; 'off' disables keepalive entirely",
     )
+    serve_parser.add_argument(
+        "--max-audio-upload-size",
+        type=str,
+        default=None,
+        help="Maximum audio upload size for /v1/audio/transcriptions and "
+        "/v1/audio/process (e.g. '100MB', '500MB'). Overrides the value "
+        "in settings.json (built-in default: 100MB). Uploads are buffered "
+        "in memory, so this is also a per-request RAM cap",
+    )
+    serve_parser.add_argument(
+        "--max-image-upload-size",
+        type=str,
+        default=None,
+        help="Maximum image payload size for VLM inputs (e.g. '50MB', '100MB'). "
+        "Overrides the value in settings.json (built-in default: 50MB).",
+    )
+    serve_parser.add_argument(
+        "--max-image-side-length",
+        type=int,
+        default=None,
+        help="Maximum side length in pixels for VLM input images. Images exceeding "
+        "this limit are downscaled preserving aspect ratio (built-in default: 2048, "
+        "0 to disable).",
+    )
 
     # Scheduler options (for BatchedEngine)
     serve_parser.add_argument(
@@ -1104,6 +1154,13 @@ Example directory structure:
         type=str,
         default=None,
         help="Maximum in-memory hot cache size (e.g., '8GB', '4GB'). Default: 0 (disabled)",
+    )
+    serve_parser.add_argument(
+        "--hot-cache-write-through",
+        action="store_true",
+        default=None,
+        help="Persist every hot-cache block to SSD immediately (write-through). "
+        "Keeps RAM-speed resume while retaining SSD durability for all sessions.",
     )
     serve_parser.add_argument(
         "--no-cache",
@@ -1186,7 +1243,7 @@ Example directory structure:
         "--api-key",
         type=str,
         default=None,
-        help="API key for authentication (optional)",
+        help="API key for authentication (required for non-loopback binds)",
     )
 
     # Launch command
