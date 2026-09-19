@@ -76,24 +76,17 @@ where the native q8 tile is not profitable.
 
 ## DFlash
 
-Qwen DFlash targets use the same per-model ANE and CPU-sharing settings during
-prefill. The target is compiled on the MLX executor at load time; the drafter is
-not modified. DFlash's prefill chunks are at least as wide as the compiled ANE
-tile, and its memory guard uses that actual chunk width. Ordinary and tree
-verification explicitly bypass ANE, including when tail padding would otherwise
-make a short verification block eligible. If setup fails or compiles no eligible
-procedures, loading continues with ordinary DFlash.
+Qwen DFlash targets use the same per-model ANE and CPU-sharing settings
+for prefill. Draft generation and verification do not use ANE. If ANE
+setup fails or finds no eligible layers, loading falls back to ordinary
+DFlash.
 
-GDN dispatch must be installed before DFlash captures the Qwen attention hooks.
-The default Qwen prefill projection patch prepares this on the first DFlash
-load, even with ANE off, so another resident target can subsequently enable ANE.
-If that dispatch is disabled or an existing hook cannot safely compose with it,
-the loader warns and skips GDN offload; eligible MLP layers can still use ANE.
+GDN offload requires the Qwen prefill projection patch; otherwise, only
+eligible MLP layers can use ANE.
 
-The tuner continues to measure standalone target prefill without the drafter.
-Its recommendation now also reaches DFlash serving, but does not measure
-end-to-end speculative throughput. Compare fresh, uncached prompts separately
-from generation throughput on the actual target/draft pair.
+The tuner measures target prefill without the drafter. Validate its
+recommendation with uncached prompts on the actual target/draft pair,
+measuring prefill and generation throughput separately.
 
 ## Per-model settings
 
